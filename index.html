@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SCM Geometry Viewer</title>
+<meta name="description" content="Browser-based 3D viewer for Sentaurus SDE Scheme (.scm) geometry files. Runs entirely client-side.">
+
+<!-- Relative path so the page works from any GitHub Pages sub-path. -->
+<link rel="stylesheet" href="css/style.css">
+
+<!--
+  Three.js is loaded from a CDN through an import map, so there is no
+  Node.js, npm or build step. GitHub Pages serves this file as-is.
+
+  To pin a different version, change both URLs below together.
+-->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+
+<body>
+
+<!-- ======================= title bar ======================= -->
+<header id="titlebar">
+  <div class="brand"><span class="dot"></span>SCM Geometry Viewer</div>
+
+  <div class="file-controls">
+    <label class="btn primary" for="file-input">Open .scm file&hellip;</label>
+    <input id="file-input" type="file" accept=".scm,.cmd,.txt" hidden>
+    <span id="file-name" class="muted">no file loaded</span>
+  </div>
+
+  <div class="header-right">
+    <span class="privacy" title="Files are read with the browser FileReader API and never leave your machine.">
+      &#128274; runs entirely in your browser
+    </span>
+    <button id="btn-panels" class="btn small" title="Show or hide the side panels">Panels</button>
+  </div>
+</header>
+
+<!-- ======================= main columns ======================= -->
+<div id="workspace">
+
+  <!-- -------- LEFT : model -------- -->
+  <aside id="left-panel">
+    <div class="panel-title">Model</div>
+
+    <div id="left-stack">
+
+      <!-- Parameters -->
+      <section class="stack-section" id="sec-parameters">
+        <h3>Parameters</h3>
+        <div class="section-body">
+          <table id="param-table">
+            <thead><tr><th>Parameter</th><th>Value</th></tr></thead>
+            <tbody id="param-body">
+              <tr><td colspan="2" class="muted pad">load a file to see parameters</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="section-actions">
+          <button id="btn-apply" class="btn" disabled>Apply</button>
+          <button id="btn-reset" class="btn" disabled>Reset</button>
+          <button id="btn-save"  class="btn" disabled>Save .scm</button>
+        </div>
+      </section>
+
+      <div class="v-resizer" data-resize="0" title="drag to resize"></div>
+
+      <!-- Materials -->
+      <section class="stack-section" id="sec-materials">
+        <h3>Materials</h3>
+        <div class="section-body">
+          <ul id="material-list" class="check-list">
+            <li class="muted pad">no materials</li>
+          </ul>
+        </div>
+      </section>
+
+      <div class="v-resizer" data-resize="1" title="drag to resize"></div>
+
+      <!-- Regions -->
+      <section class="stack-section" id="sec-regions">
+        <h3>Regions <span id="region-count" class="muted"></span></h3>
+        <div class="section-tools">
+          <input id="region-filter" type="text" placeholder="filter by name&hellip;">
+        </div>
+        <div class="section-body">
+          <ul id="region-list" class="check-list">
+            <li class="muted pad">no regions</li>
+          </ul>
+        </div>
+        <div class="section-actions">
+          <button id="btn-hide-selected" class="btn" disabled>Hide selected</button>
+          <button id="btn-show-all" class="btn" disabled>Show all</button>
+        </div>
+      </section>
+
+    </div>
+  </aside>
+
+  <div class="h-resizer" id="resize-left"></div>
+
+  <!-- -------- CENTER : 3D viewer -------- -->
+  <main id="center-panel">
+    <div id="viewer-toolbar">
+      <div class="tool-group">
+        <span class="tool-label">View</span>
+        <button class="btn small" data-view="front">Front</button>
+        <button class="btn small" data-view="back">Back</button>
+        <button class="btn small" data-view="left">Left</button>
+        <button class="btn small" data-view="right">Right</button>
+        <button class="btn small" data-view="top">Top</button>
+        <button class="btn small" data-view="bottom">Bottom</button>
+        <button class="btn small" data-view="iso">Isometric</button>
+        <button class="btn small" id="btn-reset-cam">Reset</button>
+      </div>
+
+      <div class="tool-group">
+        <span class="tool-label">Projection</span>
+        <select id="sel-projection">
+          <option value="perspective">Perspective</option>
+          <option value="orthographic">Orthographic</option>
+        </select>
+      </div>
+
+      <div class="tool-group">
+        <span class="tool-label">Mode</span>
+        <select id="sel-style">
+          <option value="surface">Surface</option>
+          <option value="wireframe">Wireframe</option>
+        </select>
+      </div>
+
+      <div class="tool-group">
+        <span class="tool-label">Opacity</span>
+        <input id="opacity" type="range" min="10" max="100" value="100">
+      </div>
+
+      <div class="tool-group">
+        <label class="chk"><input type="checkbox" id="chk-edges" checked> Edges</label>
+        <label class="chk"><input type="checkbox" id="chk-contacts" checked> Contacts</label>
+        <label class="chk"><input type="checkbox" id="chk-axes" checked> Axes</label>
+        <label class="chk"><input type="checkbox" id="chk-bbox"> Bounding box</label>
+      </div>
+    </div>
+
+    <div id="viewport">
+      <div id="viewer-hint" class="hint">
+        <strong>Open an .scm file to display the geometry.</strong><br>
+        <span class="muted">
+          left-drag rotate &middot; right-drag pan &middot; scroll zoom &middot; click a region to select
+        </span>
+      </div>
+      <div id="picked-label" class="picked-label"></div>
+      <div id="scale-note" class="scale-note"></div>
+    </div>
+  </main>
+
+  <div class="h-resizer" id="resize-right"></div>
+
+  <!-- -------- RIGHT : inspector -------- -->
+  <aside id="right-panel">
+    <div class="panel-title">Inspector</div>
+
+    <div class="tabs" id="inspector-tabs">
+      <button class="tab active" data-tab="tab-region">Region</button>
+      <button class="tab" data-tab="tab-contacts">Contacts</button>
+      <button class="tab" data-tab="tab-model">Model</button>
+    </div>
+
+    <div class="tab-body">
+
+      <div class="tab-page active" id="tab-region">
+        <table class="kv" id="region-info">
+          <tbody>
+            <tr><th>Region Name</th><td data-f="name">-</td></tr>
+            <tr><th>Material</th><td data-f="material">-</td></tr>
+            <tr><th>X minimum</th><td data-f="x0">-</td></tr>
+            <tr><th>X maximum</th><td data-f="x1">-</td></tr>
+            <tr><th>Y minimum</th><td data-f="y0">-</td></tr>
+            <tr><th>Y maximum</th><td data-f="y1">-</td></tr>
+            <tr><th>Z minimum</th><td data-f="z0">-</td></tr>
+            <tr><th>Z maximum</th><td data-f="z1">-</td></tr>
+            <tr><th>X length</th><td data-f="lx">-</td></tr>
+            <tr><th>Y length</th><td data-f="ly">-</td></tr>
+            <tr><th>Z length</th><td data-f="lz">-</td></tr>
+            <tr><th>Volume</th><td data-f="volume">-</td></tr>
+            <tr><th>Source line</th><td data-f="line">-</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="tab-page" id="tab-contacts">
+        <ul id="contact-list" class="plain-list">
+          <li class="muted pad">no contacts</li>
+        </ul>
+        <div id="contact-detail" class="detail-box muted">select a contact</div>
+      </div>
+
+      <div class="tab-page" id="tab-model">
+        <h4>Bounding box</h4>
+        <table class="kv" id="model-bounds">
+          <tbody>
+            <tr><th>X range</th><td data-f="bx">-</td></tr>
+            <tr><th>Y range</th><td data-f="by">-</td></tr>
+            <tr><th>Z range</th><td data-f="bz">-</td></tr>
+            <tr><th>X size</th><td data-f="sx">-</td></tr>
+            <tr><th>Y size</th><td data-f="sy">-</td></tr>
+            <tr><th>Z size</th><td data-f="sz">-</td></tr>
+            <tr><th>Aspect ratio</th><td data-f="aspect">-</td></tr>
+            <tr><th>Total volume</th><td data-f="vol">-</td></tr>
+          </tbody>
+        </table>
+
+        <h4>Counts</h4>
+        <table class="kv" id="model-counts">
+          <tbody>
+            <tr><th>Regions</th><td data-f="regions">-</td></tr>
+            <tr><th>Materials</th><td data-f="materials">-</td></tr>
+            <tr><th>Contacts</th><td data-f="contacts">-</td></tr>
+            <tr><th>Parameters</th><td data-f="params">-</td></tr>
+            <tr><th>Errors</th><td data-f="errors">-</td></tr>
+            <tr><th>Warnings</th><td data-f="warnings">-</td></tr>
+          </tbody>
+        </table>
+
+        <h4>Material breakdown</h4>
+        <ul id="material-breakdown" class="plain-list">
+          <li class="muted pad">-</li>
+        </ul>
+
+        <h4>Quick checks</h4>
+        <ul id="quick-checks" class="plain-list">
+          <li class="muted pad">-</li>
+        </ul>
+      </div>
+
+    </div>
+  </aside>
+</div>
+
+<div class="v-resizer bottom" id="resize-bottom"></div>
+
+<!-- ======================= bottom : parsing log ======================= -->
+<footer id="log-panel">
+  <div class="panel-title">
+    Parsing log
+    <span id="log-counts" class="muted"></span>
+    <button id="btn-clear-log" class="btn tiny">Clear</button>
+  </div>
+  <pre id="log-body"></pre>
+</footer>
+
+<script type="module" src="js/viewer.js"></script>
+</body>
+</html>
