@@ -441,6 +441,182 @@ class Evaluator {
   }
 }
 
+/* ==========================================================================
+   Sequential overlap resolution
+   --------------------------------------------------------------------------
+   SDE geometry is created sequentially. When a region is created on top of an
+   earlier one, the later region wins the shared volume:
+
+        A_final = A - intersection(A, B)          B created after A
+        B_final = B
+
+   Overlap is therefore normal, intentional geometry, not an error.
+
+   Every region here is an axis-aligned box, so subtracting one box from
+   another yields at most six boxes. Splitting into "slabs" keeps the result
+   exact and free of gaps or double counting:
+
+        1. everything of A below B in X, and above B in X
+        2. within the shared X range, everything below and above B in Y
+        3. within the shared X and Y range, everything below and above B in Z
+
+   Each region ends up with a list of fragments. That fragment list is what
+   the viewer renders, what the picker hit-tests, and what the statistics
+   count, so parsing, validation, rendering, selection and the inspector all
+   agree on the same final geometry.
+   ========================================================================== */
+
+const OVL_EPS = 1e-12;
+
+/* Guards so a pathological file cannot lock the browser. Subtracting boxes
+   can in principle multiply fragments; these caps make it degrade gracefully
+   into "render the original box and warn" instead of hanging. */
+const MAX_FRAGMENTS_PER_REGION = 512;
+const MAX_TOTAL_FRAGMENTS = 20000;
+
+/** True only for a real shared VOLUME. Touching faces are not an overlap. */
+function boxesOverlap(a, b) {
+  return (Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0) > OVL_EPS &&
+          Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0) > OVL_EPS &&
+          Math.min(a.z1, b.z1) - Math.max(a.z0, b.z0) > OVL_EPS);
+}
+
+function boxVolume(b) {
+  return Math.max(0, b.x1 - b.x0) *
+         Math.max(0, b.y1 - b.y0) *
+         Math.max(0, b.z1 - b.z0);
+}
+
+function intersectionVolume(a, b) {
+  return Math.max(0, Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0)) *
+         Math.max(0, Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0)) *
+         Math.max(0, Math.min(a.z1, b.z1) - Math.max(a.z0, b.z0));
+}
+
+function mkBox(x0, x1, y0, y1, z0, z1) {
+  return { x0, x1, y0, y1, z0, z1 };
+}
+
+/**
+ * a minus b, as a list of disjoint boxes.
+ * Returns [a] unchanged when they do not share volume, and [] when b
+ * completely swallows a.
+ */
+function subtractBox(a, b) {
+  if (!boxesOverlap(a, b)) return [a];
+
+  const out = [];
+
+  // --- 1. slabs of A outside B along X (full Y and Z extent) -------------
+  if (b.x0 > a.x0 + OVL_EPS) out.push(mkBox(a.x0, b.x0, a.y0, a.y1, a.z0, a.z1));
+  if (b.x1 < a.x1 - OVL_EPS) out.push(mkBox(b.x1, a.x1, a.y0, a.y1, a.z0, a.z1));
+
+  const mx0 = Math.max(a.x0, b.x0);
+  const mx1 = Math.min(a.x1, b.x1);
+
+  // --- 2. within the shared X range, slabs outside B along Y ------------
+  if (b.y0 > a.y0 + OVL_EPS) out.push(mkBox(mx0, mx1, a.y0, b.y0, a.z0, a.z1));
+  if (b.y1 < a.y1 - OVL_EPS) out.push(mkBox(mx0, mx1, b.y1, a.y1, a.z0, a.z1));
+
+  const my0 = Math.max(a.y0, b.y0);
+  const my1 = Math.min(a.y1, b.y1);
+
+  // --- 3. within the shared X and Y range, slabs outside B along Z ------
+  if (b.z0 > a.z0 + OVL_EPS) out.push(mkBox(mx0, mx1, my0, my1, a.z0, b.z0));
+  if (b.z1 < a.z1 - OVL_EPS) out.push(mkBox(mx0, mx1, my0, my1, b.z1, a.z1));
+
+  // drop anything that came out degenerate
+  return out.filter((f) => f.x1 - f.x0 > OVL_EPS &&
+                           f.y1 - f.y0 > OVL_EPS &&
+                           f.z1 - f.z0 > OVL_EPS);
+}
+
+/**
+ * Apply the sequential replacement rule across the whole region list.
+ *
+ * Regions must already be in SCM creation order, which is how the parser
+ * collects them. For each region, every LATER region is subtracted from it.
+ *
+ * Mutates each region, adding:
+ *   fragments       disjoint boxes that survive, what gets rendered
+ *   originalVolume  volume of the region as written in the file
+ *   visibleVolume   volume that survives
+ *   replacedBy      names of later regions that took volume from it
+ *   fullyReplaced   true when nothing survives
+ *
+ * Returns a summary used by the log, the statistics panel and the checks.
+ */
+function resolveOverlaps(regions) {
+  const overlaps = [];          // { later, earlier, volume }
+  const fullyReplaced = [];
+  const fragmentOverflow = [];
+  let totalFragments = 0;
+
+  for (let i = 0; i < regions.length; i++) {
+    const r = regions[i];
+    const self = mkBox(r.x0, r.x1, r.y0, r.y1, r.z0, r.z1);
+
+    r.originalVolume = boxVolume(self);
+    r.replacedBy = [];
+
+    let frags = [self];
+    let overflowed = false;
+
+    for (let j = i + 1; j < regions.length; j++) {
+      const later = regions[j];
+
+      // cheap reject against the region as a whole before touching fragments
+      if (!boxesOverlap(self, later)) continue;
+
+      const vol = intersectionVolume(self, later);
+      r.replacedBy.push(later.name);
+      overlaps.push({ later: later.name, earlier: r.name, volume: vol });
+
+      if (overflowed || !frags.length) continue;
+
+      const next = [];
+      for (const f of frags) {
+        if (boxesOverlap(f, later)) next.push(...subtractBox(f, later));
+        else next.push(f);
+      }
+      frags = next;
+
+      if (frags.length > MAX_FRAGMENTS_PER_REGION) {
+        overflowed = true;
+        fragmentOverflow.push(r.name);
+        frags = [self];                    // fall back to the undivided box
+      }
+    }
+
+    r.fragments = frags;
+    r.visibleVolume = frags.reduce((s, f) => s + boxVolume(f), 0);
+    r.fullyReplaced = frags.length === 0;
+    r.fragmentOverflow = overflowed;
+    if (r.fullyReplaced) fullyReplaced.push(r.name);
+
+    totalFragments += frags.length;
+    if (totalFragments > MAX_TOTAL_FRAGMENTS) {
+      // stop subdividing entirely; remaining regions keep their whole box
+      for (let k = i + 1; k < regions.length; k++) {
+        const rr = regions[k];
+        rr.fragments = [mkBox(rr.x0, rr.x1, rr.y0, rr.y1, rr.z0, rr.z1)];
+        rr.originalVolume = boxVolume(rr.fragments[0]);
+        rr.visibleVolume = rr.originalVolume;
+        rr.replacedBy = [];
+        rr.fullyReplaced = false;
+        rr.fragmentOverflow = true;
+      }
+      return {
+        overlaps, fullyReplaced, fragmentOverflow,
+        totalFragments, aborted: true,
+      };
+    }
+  }
+
+  return { overlaps, fullyReplaced, fragmentOverflow, totalFragments, aborted: false };
+}
+
+
 /* ---------------------------------------------------------------- SDE hooks */
 
 /* Commands that are real SDE but have no effect on the geometry we draw.
@@ -631,6 +807,37 @@ export function parseScm(text, overrides = {}) {
 }
 
 function finish(result, log) {
+  /* ---- sequential overlap resolution ---------------------------------
+     Overlap is legal in SDE: a later region replaces the shared volume of
+     an earlier one. Resolve that here, once, so parsing, validation,
+     rendering, picking and the statistics all read the same final
+     geometry. Reported as INFO, never as an error. */
+  const ovl = resolveOverlaps(result.regions);
+  result.overlapSummary = ovl;
+
+  for (const o of ovl.overlaps) {
+    log('info',
+      `Region "${o.later}" overlaps region "${o.earlier}". The overlapping ` +
+      `volume is replaced by the later-created region according to SCM ` +
+      `creation order.`);
+  }
+  if (ovl.fullyReplaced.length) {
+    log('info',
+      `${ovl.fullyReplaced.length} region(s) are completely replaced by ` +
+      `later geometry and are not drawn: ${ovl.fullyReplaced.join(', ')}`);
+  }
+  if (ovl.fragmentOverflow.length) {
+    log('warning',
+      `overlap resolution hit its fragment limit for ` +
+      `${ovl.fragmentOverflow.length} region(s); they are drawn undivided: ` +
+      `${[...new Set(ovl.fragmentOverflow)].slice(0, 6).join(', ')}`);
+  }
+  if (ovl.aborted) {
+    log('warning',
+      'overlap resolution stopped early to keep the viewer responsive; ' +
+      'later regions are drawn without subtraction');
+  }
+
   // resolve each contact pick point to a region and a face direction
   for (const c of result.contacts) {
     if (!c.position) continue;
@@ -666,6 +873,15 @@ function finish(result, log) {
   if (unattached.length) {
     log('warning', `${unattached.length} contact set(s) declared but never attached to a face: ${unattached.join(', ')}`);
   }
+
+  const ovlSum = result.overlapSummary || { overlaps: [], fullyReplaced: [], totalFragments: 0 };
+  result.stats = {
+    defined:       result.regions.length,
+    visible:       result.regions.filter((r) => !r.fullyReplaced).length,
+    fullyReplaced: ovlSum.fullyReplaced.length,
+    replacementOverlaps: ovlSum.overlaps.length,
+    fragments:     result.regions.reduce((s, r) => s + (r.fragments ? r.fragments.length : 0), 0),
+  };
 
   result.materials = [...new Set(result.regions.map((r) => r.material))].sort();
   result.bounds = result.regions.length ? [
@@ -726,7 +942,7 @@ const state = {
 };
 
 let renderer, scene, camera, perspCam, orthoCam, controls;
-let modelGroup, regionGroup, edgeGroup, contactGroup, axesGroup, bboxGroup, highlight;
+let modelGroup, regionGroup, edgeGroup, contactGroup, axesGroup, bboxGroup, highlightGroup;
 let raycaster, pointer;
 const meshByName = new Map();
 const edgeByName = new Map();
@@ -780,10 +996,9 @@ function initThree() {
   unitBox = new THREE.BoxGeometry(1, 1, 1);
   unitEdges = new THREE.EdgesGeometry(unitBox);
 
-  highlight = new THREE.LineSegments(
-    unitEdges, new THREE.LineBasicMaterial({ color: 0xffe14d }));
-  highlight.visible = false;
-  modelGroup.add(highlight);
+  // Outline group: one wireframe box per fragment of the selected region.
+  highlightGroup = new THREE.Group();
+  modelGroup.add(highlightGroup);
 
   raycaster = new THREE.Raycaster();
   pointer = new THREE.Vector2();
@@ -814,6 +1029,7 @@ function onResize() {
 }
 
 function clearScene() {
+  clearHighlight();
   for (const g of [regionGroup, edgeGroup, contactGroup, axesGroup, bboxGroup]) {
     while (g.children.length) {
       const c = g.children.pop();
@@ -826,7 +1042,7 @@ function clearScene() {
   }
   meshByName.clear();
   edgeByName.clear();
-  highlight.visible = false;
+  clearHighlight();
 }
 
 /* SCM coordinates are micrometres, so a device spans ~0.08 units. Numbers
@@ -844,30 +1060,58 @@ function buildScene(model) {
   const s = 20 / maxSpan;
   const cx = (b[0] + b[1]) / 2, cy = (b[2] + b[3]) / 2, cz = (b[4] + b[5]) / 2;
 
-  for (const r of model.regions) {
-    const mat = new THREE.MeshLambertMaterial({
-      color: new THREE.Color(r.color),
-      transparent: true,
-      opacity: state.opacity,
-      wireframe: state.style === 'wireframe',
-      side: THREE.DoubleSide,
-      depthWrite: state.opacity >= 0.99,
-    });
-    const mesh = new THREE.Mesh(unitBox, mat);
-    mesh.scale.set(r.lx * s, r.ly * s, r.lz * s);
-    mesh.position.set((r.center[0] - cx) * s, (r.center[1] - cy) * s, (r.center[2] - cz) * s);
-    mesh.userData.region = r;
-    mesh.visible = regionVisible(r);
-    regionGroup.add(mesh);
-    meshByName.set(r.name, mesh);
+  /* One mesh per FRAGMENT, not per region.
 
-    const e = new THREE.LineSegments(unitEdges,
-      new THREE.LineBasicMaterial({ color: 0x0d1116, transparent: true, opacity: 0.85 }));
-    e.scale.copy(mesh.scale);
-    e.position.copy(mesh.position);
-    e.visible = mesh.visible && state.showEdges && state.style === 'surface';
-    edgeGroup.add(e);
-    edgeByName.set(r.name, e);
+     After sequential overlap resolution a region is a list of disjoint
+     boxes: the parts that survived later regions being created on top of
+     it. Drawing the fragments is what makes the viewer show the real final
+     geometry rather than two opaque boxes fighting over the same volume.
+
+     Every fragment carries a reference back to its parent region, so
+     picking, the region list and the inspector still work in terms of
+     whole regions. */
+  for (const r of model.regions) {
+    const frags = (r.fragments && r.fragments.length)
+      ? r.fragments
+      : (r.fullyReplaced ? [] : [{ x0: r.x0, x1: r.x1, y0: r.y0, y1: r.y1, z0: r.z0, z1: r.z1 }]);
+
+    if (!frags.length) continue;            // completely replaced: draw nothing
+
+    const vis = regionVisible(r);
+    const meshes = [];
+    const edgesFor = [];
+
+    for (const f of frags) {
+      const mat = new THREE.MeshLambertMaterial({
+        color: new THREE.Color(r.color),
+        transparent: true,
+        opacity: state.opacity,
+        wireframe: state.style === 'wireframe',
+        side: THREE.DoubleSide,
+        depthWrite: state.opacity >= 0.99,
+      });
+      const mesh = new THREE.Mesh(unitBox, mat);
+      mesh.scale.set((f.x1 - f.x0) * s, (f.y1 - f.y0) * s, (f.z1 - f.z0) * s);
+      mesh.position.set(((f.x0 + f.x1) / 2 - cx) * s,
+                        ((f.y0 + f.y1) / 2 - cy) * s,
+                        ((f.z0 + f.z1) / 2 - cz) * s);
+      mesh.userData.region = r;
+      mesh.userData.fragment = f;
+      mesh.visible = vis;
+      regionGroup.add(mesh);
+      meshes.push(mesh);
+
+      const e = new THREE.LineSegments(unitEdges,
+        new THREE.LineBasicMaterial({ color: 0x0d1116, transparent: true, opacity: 0.85 }));
+      e.scale.copy(mesh.scale);
+      e.position.copy(mesh.position);
+      e.visible = vis && state.showEdges && state.style === 'surface';
+      edgeGroup.add(e);
+      edgesFor.push(e);
+    }
+
+    meshByName.set(r.name, meshes);
+    edgeByName.set(r.name, edgesFor);
   }
 
   // contacts
@@ -966,6 +1210,34 @@ function buildAxes() {
   axesGroup.visible = state.showAxes;
 }
 
+/* ---------------------------------------------------------------- selection outline */
+/**
+ * Outline the given meshes.
+ *
+ * A region that had later geometry created over it survives as several
+ * disjoint fragments, so the selection outline is a group of boxes rather
+ * than a single one. Passing an empty list clears the outline.
+ */
+function setHighlight(meshList) {
+  clearHighlight();
+  for (const m of meshList) {
+    if (!m.visible) continue;
+    const box = new THREE.LineSegments(
+      unitEdges, new THREE.LineBasicMaterial({ color: 0xffe14d }));
+    box.scale.copy(m.scale).multiplyScalar(1.012);
+    box.position.copy(m.position);
+    highlightGroup.add(box);
+  }
+}
+
+function clearHighlight() {
+  if (!highlightGroup) return;
+  while (highlightGroup.children.length) {
+    const c = highlightGroup.children.pop();
+    if (c.material) c.material.dispose();
+  }
+}
+
 /* ---------------------------------------------------------------- visibility */
 function regionVisible(r) {
   return !state.hiddenMaterials.has(r.material) && !state.hiddenRegions.has(r.name);
@@ -975,25 +1247,28 @@ function applyVisibility() {
   if (!state.model) return;
   for (const r of state.model.regions) {
     const vis = regionVisible(r);
-    const m = meshByName.get(r.name);
-    const e = edgeByName.get(r.name);
-    if (m) m.visible = vis;
-    if (e) e.visible = vis && state.showEdges && state.style === 'surface';
+    for (const m of (meshByName.get(r.name) || [])) m.visible = vis;
+    for (const e of (edgeByName.get(r.name) || [])) {
+      e.visible = vis && state.showEdges && state.style === 'surface';
+    }
   }
   renderRegionList();
   renderMaterials();
 }
 
 function applyStyle() {
-  meshByName.forEach((m) => {
-    m.material.opacity = state.opacity;
-    m.material.wireframe = state.style === 'wireframe';
-    m.material.depthWrite = state.opacity >= 0.99;
-    m.material.needsUpdate = true;
+  meshByName.forEach((list) => {
+    for (const m of list) {
+      m.material.opacity = state.opacity;
+      m.material.wireframe = state.style === 'wireframe';
+      m.material.depthWrite = state.opacity >= 0.99;
+      m.material.needsUpdate = true;
+    }
   });
-  edgeByName.forEach((e, name) => {
-    const m = meshByName.get(name);
-    e.visible = (m ? m.visible : false) && state.showEdges && state.style === 'surface';
+  edgeByName.forEach((list, name) => {
+    const meshes = meshByName.get(name) || [];
+    const vis = meshes.length ? meshes[0].visible : false;
+    for (const e of list) e.visible = vis && state.showEdges && state.style === 'surface';
   });
 }
 
@@ -1207,6 +1482,13 @@ function renderRegionList() {
     li.dataset.name = r.name;
     li.classList.toggle('selected', r.name === state.selectedRegion);
     li.classList.toggle('is-hidden', !regionVisible(r));
+    if (r.fullyReplaced) {
+      li.classList.add('is-replaced');
+      li.title = `fully replaced by ${r.replacedBy.join(', ')}`;
+    } else if (r.replacedBy && r.replacedBy.length) {
+      li.classList.add('is-partial');
+      li.title = `partially replaced by ${r.replacedBy.join(', ')}`;
+    }
 
     const cb = document.createElement('input');
     cb.type = 'checkbox';
@@ -1280,12 +1562,32 @@ function renderModelTab() {
   setField('#model-bounds', 'aspect', `${fmtNum(mx / (mn || 1), 3)} : 1`);
   setField('#model-bounds', 'vol', fmtNum(m.regions.reduce((s, r) => s + r.volume, 0), 4));
 
-  setField('#model-counts', 'regions', m.regions.length);
+  const stats = m.stats || {};
+  setField('#model-counts', 'regions',   stats.defined ?? m.regions.length);
+  setField('#model-counts', 'visible',   stats.visible ?? m.regions.length);
+  setField('#model-counts', 'overlaps',  stats.replacementOverlaps ?? 0);
+  setField('#model-counts', 'replaced',  stats.fullyReplaced ?? 0);
+  setField('#model-counts', 'fragments', stats.fragments ?? m.regions.length);
   setField('#model-counts', 'materials', m.materials.length);
-  setField('#model-counts', 'contacts', m.contacts.length);
-  setField('#model-counts', 'params', Object.keys(m.parameters).length);
-  setField('#model-counts', 'errors', m.errors.length);
-  setField('#model-counts', 'warnings', m.warnings.length);
+  setField('#model-counts', 'contacts',  m.contacts.length);
+  setField('#model-counts', 'params',    Object.keys(m.parameters).length);
+  setField('#model-counts', 'errors',    m.errors.length);
+  setField('#model-counts', 'warnings',  m.warnings.length);
+
+  // Overall verdict. Overlaps alone never make a model invalid.
+  const statusEl = document.querySelector('#model-status');
+  if (statusEl) {
+    if (m.errors.length) {
+      statusEl.className = 'verdict bad';
+      statusEl.textContent = `\u2717 ${m.errors.length} error(s) - geometry invalid`;
+    } else if (m.warnings.length) {
+      statusEl.className = 'verdict warn';
+      statusEl.textContent = `\u2713 Valid geometry, ${m.warnings.length} warning(s)`;
+    } else {
+      statusEl.className = 'verdict good';
+      statusEl.textContent = '\u2713 Valid geometry';
+    }
+  }
 
   // material breakdown
   const bd = $('#material-breakdown');
@@ -1306,8 +1608,8 @@ function renderModelTab() {
   qc.innerHTML = '';
   const add = (kind, text) => {
     const li = document.createElement('li');
-    const cls = kind === 'ok' ? 'badge-ok' : kind === 'warn' ? 'badge-warn' : 'badge-err';
-    const lbl = kind === 'ok' ? 'OK' : kind === 'warn' ? 'WARN' : 'FAIL';
+    const cls = { ok: 'badge-ok', warn: 'badge-warn', err: 'badge-err', info: 'badge-info' }[kind];
+    const lbl = { ok: 'OK', warn: 'WARN', err: 'FAIL', info: 'INFO' }[kind];
     li.innerHTML = `<span class="badge ${cls}">${lbl}</span><span>${escapeHtml(text)}</span>`;
     qc.appendChild(li);
   };
@@ -1321,21 +1623,24 @@ function renderModelTab() {
   add(dupes.length ? 'warn' : 'ok',
       dupes.length ? `${new Set(dupes).size} duplicate region name(s)` : 'all region names unique');
 
-  // overlap test, capped so a huge file cannot freeze the tab
-  if (m.regions.length <= 600) {
-    let ov = 0;
-    for (let i = 0; i < m.regions.length; i++) {
-      for (let j = i + 1; j < m.regions.length; j++) {
-        const a = m.regions[i], c = m.regions[j];
-        if (Math.min(a.x1, c.x1) - Math.max(a.x0, c.x0) > 1e-12 &&
-            Math.min(a.y1, c.y1) - Math.max(a.y0, c.y0) > 1e-12 &&
-            Math.min(a.z1, c.z1) - Math.max(a.z0, c.z0) > 1e-12) ov++;
-      }
+  /* Overlap is ALLOWED in SDE geometry: a later region replaces the shared
+     volume of an earlier one. It is reported for information, never as an
+     error, and the viewer already draws the resolved result. */
+  const st = m.stats || { replacementOverlaps: 0, fullyReplaced: 0 };
+  if (st.replacementOverlaps) {
+    add('info', `${st.replacementOverlaps} replacement overlap(s), resolved by SCM creation order`);
+    if (st.fullyReplaced) {
+      add('info', `${st.fullyReplaced} region(s) fully replaced by later geometry`);
     }
-    add(ov ? 'err' : 'ok',
-        ov ? `${ov} overlapping region pair(s)` : 'no overlapping volumes');
   } else {
-    add('warn', `overlap test skipped (${m.regions.length} regions)`);
+    add('ok', 'no overlapping volumes');
+  }
+
+  // A real error: a region that survives with no volume at all AND was not
+  // replaced by anything, which means the definition itself is degenerate.
+  const empty = m.regions.filter((r) => !r.fullyReplaced && r.visibleVolume <= 0);
+  if (empty.length) {
+    add('err', `${empty.length} region(s) have no volume and are not replaced`);
   }
 
   const unres = m.contacts.filter((c) => !c.position || !c.regionName);
@@ -1350,19 +1655,15 @@ function renderModelTab() {
 function selectRegion(name, scrollTo = true) {
   state.selectedRegion = name;
   if (name && state.model) {
-    const mesh = meshByName.get(name);
-    if (mesh) {
-      highlight.scale.copy(mesh.scale).multiplyScalar(1.01);
-      highlight.position.copy(mesh.position);
-      highlight.visible = true;
-    }
+    // A region can survive as several fragments, so outline all of them.
+    setHighlight(meshByName.get(name) || []);
     const r = state.model.regions.find((x) => x.name === name);
     $('#picked-label').textContent = `${r.name}  [${r.material}]`;
     $('#picked-label').classList.add('on');
     fillRegionInfo(r);
     switchTab('tab-region');
   } else {
-    highlight.visible = false;
+    setHighlight([]);
     $('#picked-label').classList.remove('on');
     fillRegionInfo(null);
   }
@@ -1385,6 +1686,24 @@ function fillRegionInfo(r) {
   ['x0','x1','y0','y1','z0','z1','lx','ly','lz'].forEach((f) => set(f, fmtNum(r[f])));
   set('volume', fmtNum(r.volume, 4));
   set('line', r.line ?? '-');
+
+  // sequential-overlap detail for this region
+  const vis = document.querySelector('#region-info [data-f="visvol"]');
+  if (vis) {
+    vis.textContent = (r.visibleVolume === undefined)
+      ? '-'
+      : fmtNum(r.visibleVolume, 4) +
+        (r.originalVolume && r.visibleVolume < r.originalVolume - 1e-15
+          ? `  (${(100 * r.visibleVolume / r.originalVolume).toFixed(1)}% of defined)` : '');
+  }
+  const fr = document.querySelector('#region-info [data-f="frags"]');
+  if (fr) fr.textContent = r.fragments ? r.fragments.length : '-';
+  const rb = document.querySelector('#region-info [data-f="replacedby"]');
+  if (rb) {
+    rb.textContent = r.fullyReplaced
+      ? `fully replaced by ${r.replacedBy.join(', ')}`
+      : (r.replacedBy && r.replacedBy.length ? r.replacedBy.join(', ') : 'none');
+  }
 }
 
 function selectContact(name) {

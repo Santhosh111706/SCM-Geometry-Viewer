@@ -193,6 +193,9 @@
             <tr><th>Y length</th><td data-f="ly">-</td></tr>
             <tr><th>Z length</th><td data-f="lz">-</td></tr>
             <tr><th>Volume</th><td data-f="volume">-</td></tr>
+            <tr><th>Visible volume</th><td data-f="visvol">-</td></tr>
+            <tr><th>Fragments</th><td data-f="frags">-</td></tr>
+            <tr><th>Replaced by</th><td data-f="replacedby">-</td></tr>
             <tr><th>Source line</th><td data-f="line">-</td></tr>
           </tbody>
         </table>
@@ -220,10 +223,14 @@
           </tbody>
         </table>
 
-        <h4>Counts</h4>
+        <h4>Geometry statistics</h4>
         <table class="kv" id="model-counts">
           <tbody>
-            <tr><th>Regions</th><td data-f="regions">-</td></tr>
+            <tr><th>Regions defined</th><td data-f="regions">-</td></tr>
+            <tr><th>Final visible regions</th><td data-f="visible">-</td></tr>
+            <tr><th>Replacement overlaps</th><td data-f="overlaps">-</td></tr>
+            <tr><th>Fully replaced</th><td data-f="replaced">-</td></tr>
+            <tr><th>Drawn fragments</th><td data-f="fragments">-</td></tr>
             <tr><th>Materials</th><td data-f="materials">-</td></tr>
             <tr><th>Contacts</th><td data-f="contacts">-</td></tr>
             <tr><th>Parameters</th><td data-f="params">-</td></tr>
@@ -231,6 +238,14 @@
             <tr><th>Warnings</th><td data-f="warnings">-</td></tr>
           </tbody>
         </table>
+
+        <div id="model-status" class="verdict">-</div>
+
+        <p class="overlap-note">
+          Overlapping regions are allowed. A later-created region replaces the
+          overlapping portion of earlier regions, following SCM creation order.
+          Overlap on its own never makes the geometry invalid.
+        </p>
 
         <h4>Material breakdown</h4>
         <ul id="material-breakdown" class="plain-list">

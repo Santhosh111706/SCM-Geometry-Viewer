@@ -563,3 +563,58 @@ body.resizing canvas { pointer-events: none; }
   .tool-label { display: none; }
   #viewport { height: 48vh; }
 }
+
+
+/* ==========================================================================
+   Sequential overlap presentation
+   Overlap is legal geometry, so it is styled as information, not as a fault.
+   ========================================================================== */
+
+.badge-info {
+  background: rgba(76,141,255,.16);
+  color: var(--accent);
+  border: 1px solid rgba(76,141,255,.4);
+}
+
+/* overall verdict under the statistics table */
+.verdict {
+  margin-top: 10px;
+  padding: 8px 11px;
+  border-radius: var(--radius);
+  font-size: 12.5px;
+  font-weight: 600;
+  border: 1px solid var(--line);
+  background: var(--bg-2);
+  color: var(--fg-dim);
+}
+.verdict.good { color: var(--ok);   border-color: rgba(53,196,106,.45); background: rgba(53,196,106,.08); }
+.verdict.warn { color: var(--warn); border-color: rgba(232,163,61,.45); background: rgba(232,163,61,.08); }
+.verdict.bad  { color: var(--err);  border-color: rgba(239,77,77,.45);  background: rgba(239,77,77,.08); }
+
+.overlap-note {
+  margin: 10px 0 0;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--fg-dim);
+  border-left: 2px solid var(--line-2);
+  padding-left: 9px;
+}
+
+/* region list markers: partially or fully replaced by later geometry */
+.check-list li.is-partial .rname::after {
+  content: " \25E7";                 /* half-filled square */
+  color: var(--accent);
+  font-size: 10px;
+}
+.check-list li.is-replaced .rname {
+  opacity: .5;
+  text-decoration: line-through;
+}
+.check-list li.is-replaced .rname::after {
+  content: " replaced";
+  font-size: 9.5px;
+  letter-spacing: .4px;
+  color: var(--warn);
+  text-decoration: none;
+  opacity: .9;
+}
