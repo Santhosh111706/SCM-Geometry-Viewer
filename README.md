@@ -12,7 +12,7 @@ JavaScript port of the parser and rendered with Three.js loaded from a CDN.
 Once Pages is enabled (below), the app is served at:
 
 ```
-https://<your-username>.github.io/SCM-Geometry-Viewer/
+https://<your-username>.github.io/SCM-Geometry-Viewer/](https://santhosh111706.github.io/SCM-Geometry-Viewer/
 ```
 
 ### Enabling GitHub Pages
