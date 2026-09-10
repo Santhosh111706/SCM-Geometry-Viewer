@@ -1,73 +1,59 @@
-## Web version (GitHub Pages)
+# SCM Geometry Viewer
 
-A **static, browser-only** build of the viewer lives in [`web/`](web/). It needs
-no Python, no Flask, no Node.js and no server: the SCM file is parsed by a
-JavaScript port of the parser and rendered with Three.js loaded from a CDN.
+A browser-based 3D visualization tool for viewing and analyzing **Synopsys Sentaurus Structure Editor (SDE) Scheme (`.scm`) files**.
 
-**Files you open stay on your machine.** They are read with the browser's
-`FileReader` API; nothing is uploaded anywhere.
+The SCM Geometry Viewer allows users to upload an SCM file and visually inspect the generated semiconductor device structure, materials, regions, contacts, dimensions, and geometry directly in a web browser.
 
-### Live demo
+## Features
 
-Once Pages is enabled (below), the app is served at:
+- 3D visualization of SDE `.scm` geometry
+- Browser-based — no installation required
+- Upload and parse `.scm` files
+- Visualize semiconductor materials with different colors
+- Display device regions and structures
+- Select individual regions for inspection
+- Inspect region properties and dimensions
+- Display electrical contacts
+- Show coordinate axes and bounding box
+- Control transparency and edge visibility
+- Different viewing and projection modes
+- Geometry overlap detection and visualization
+- Scrollable side panels
+- Responsive layout for desktop and mobile devices
+- Parsing log for debugging and file analysis
+- Works with complex 3D device structures
 
-```
-https://<your-username>.github.io/SCM-Geometry-Viewer/](https://santhosh111706.github.io/SCM-Geometry-Viewer/
-```
+## Supported Files
 
-### Enabling GitHub Pages
+The primary supported file format is:
 
-1. Push this repository to GitHub.
-2. Go to **Settings → Pages**.
-3. Under **Build and deployment**, set **Source** to **Deploy from a branch**.
-4. Choose branch **main** and folder **/web**.
-5. Click **Save**. The first build takes a minute or two.
+- `.scm` — Sentaurus Structure Editor Scheme file
 
-> If `/web` is not offered in the folder dropdown, GitHub only lists `/` and
-> `/docs`. In that case either rename `web/` to `docs/` and select `/docs`, or
-> use a GitHub Actions Pages workflow that publishes the `web/` directory.
+The viewer is designed primarily for **3D semiconductor device structures generated using Synopsys Sentaurus Structure Editor (SDE)**.
 
-### Running the web version locally
+## How It Works
 
-Because it uses ES modules, opening `index.html` from a `file://` URL will be
-blocked by the browser. Serve the folder over HTTP instead:
+The basic workflow is:
 
-```bash
-cd web
-python -m http.server 8000
-```
-
-Then open <http://localhost:8000>.
-
-### Desktop vs web
-
-|  | Desktop (`main.py`) | Web (`web/`) |
-|---|---|---|
-| Runtime | Python + PySide6 + PyVista | browser only |
-| Parser | `parser/scm_parser.py` | JavaScript port in `web/js/viewer.js` |
-| 3D engine | VTK | Three.js |
-| Install | `pip install -r requirements.txt` | none |
-| Deployment | run locally | GitHub Pages |
-
-Both parsers were run against the same file and produce identical regions,
-coordinates, contacts and parameters. The desktop application is unchanged and
-remains the reference implementation.
-
-### What the web version supports
-
-- Open a local `.scm` file, or drag and drop one onto the viewer
-- Cuboid regions drawn at their real coordinates, coloured by material
-- Camera presets: Front, Back, Left, Right, Top, Bottom, Isometric, Reset
-- Perspective and orthographic projection
-- Surface and wireframe modes, opacity slider, edge toggle
-- Rotate, pan and zoom; click a region to select and inspect it
-- Hide or show individual regions and whole materials
-- Editable parameters that recompute dependent coordinates and rebuild the model
-- Save a modified `.scm` back to disk
-- Bounding box, dimensions, material breakdown and quick structural checks
-- Parsing log with errors and warnings reported by source line
-
-**Not supported in either version:** Boolean operations (`bool-unite`,
-`bool-subtract`) are not evaluated, so a file that carves regions rather than
-tiling them will show its pre-Boolean cuboids. Non-cuboid primitives are skipped
-with a warning in the log.
+```text
+        SCM File
+           │
+           ▼
+     Upload .scm File
+           │
+           ▼
+      Parse Geometry
+           │
+           ▼
+   Extract Regions/Materials
+           │
+           ▼
+     Build 3D Geometry
+           │
+           ▼
+      Interactive Viewer
+           │
+     ┌─────┴─────┐
+     ▼           ▼
+  Inspect      Analyze
+  Regions      Contacts
